@@ -76,7 +76,7 @@ export async function POST(req: Request) {
         let fullText = ''
 
         const anthropicStream = anthropic.messages.stream({
-          model: 'claude-3-5-sonnet-20241022',
+          model: 'claude-sonnet-4-6',
           max_tokens: 4096,
           system: buildSystemPrompt(activeConfig),
           messages: [{ role: 'user', content: userContent }],
