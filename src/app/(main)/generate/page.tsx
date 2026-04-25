@@ -66,11 +66,11 @@ export default function GeneratePage() {
     try {
       const res = await fetch('/api/generate', { method: 'POST', body: formData })
       if (!res.ok) {
-        let detail = `HTTP ${res.status}`
+        let detail = `[E1] HTTP ${res.status}`
         try {
           const err = await res.json()
-          detail = err.error ?? detail
-          if (err.detail) detail += `: ${err.detail}`
+          detail = `[E1] HTTP ${res.status} — ${err.error ?? '未知错误'}`
+          if (err.detail) detail += ` (${err.detail})`
         } catch {
           detail += ` — ${await res.text().catch(() => '(no body)')}`
         }
@@ -81,6 +81,7 @@ export default function GeneratePage() {
       const decoder = new TextDecoder()
       let buffer = ''
       let lineNum = 0
+      const startMs = Date.now()
 
       while (true) {
         const { done, value } = await reader.read()
@@ -109,32 +110,42 @@ export default function GeneratePage() {
             if (payload.result && payload.result.version_a) {
               setOutput(payload.result)
             } else {
-              // result field was missing or empty — fall back to parsing stream text
               const fallback = extractJsonFallback(accumulatedText)
-              if (fallback) setOutput(fallback)
-              else throw new Error('生成结果结构异常，请重试')
+              if (fallback) {
+                setOutput(fallback)
+              } else {
+                throw new Error(
+                  `[E2] done事件收到但结果为空 — chars:${accumulatedText.length} events:${lineNum}`
+                )
+              }
             }
             setStreaming(false)
           } else if (payload.type === 'error') {
-            throw new Error(payload.message ?? '服务端错误')
+            throw new Error(`[E3] 服务端错误 — ${payload.message ?? '未知'}`)
           }
         }
       }
 
-      // Stream ended without a done event — try to parse what we received
+      // Stream ended without a done event
       if (!gotDoneEvent) {
-        console.warn('[generate] stream ended without done event, attempting fallback parse')
+        const elapsed = Math.round((Date.now() - startMs) / 1000)
+        const chars = accumulatedText.length
+        console.warn('[generate] no done event', { lineNum, chars, elapsed })
         const fallback = extractJsonFallback(accumulatedText)
         if (fallback) {
           setOutput(fallback)
         } else if (lineNum === 0) {
-          throw new Error('服务端无响应 — 请检查终端日志')
+          throw new Error(`[E4] 服务端无响应 (${elapsed}s) — 请检查Vercel Function日志`)
         } else {
-          throw new Error('生成未完成，请重试')
+          // Most likely cause: Vercel function timeout cut the stream mid-JSON
+          throw new Error(
+            `[E5] 流中断 (${elapsed}s) — 已收到${lineNum}行/${chars}字符但JSON不完整。` +
+            `可能是Vercel函数超时(Hobby限10s)。末尾: "${accumulatedText.slice(-80)}"`
+          )
         }
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '生成失败，请重试'
+      const msg = err instanceof Error ? err.message : '[E0] 生成失败'
       console.error('[generate] client error:', msg)
       setError(msg)
     } finally {
