@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { OutputPanel } from '@/components/generate/OutputPanel'
+import { OutputPanel, outputToVersionsState } from '@/components/generate/OutputPanel'
 import type { History } from '@/types'
 
 export default function HistoryPage() {
@@ -164,7 +164,7 @@ export default function HistoryPage() {
                 </Button>
               </div>
 
-              <OutputPanel output={selected.output} streaming={false} streamText="" />
+              <OutputPanel versions={outputToVersionsState(selected.output)} />
             </div>
           )}
         </DialogContent>

@@ -1,19 +1,17 @@
 import { createClient } from '@/lib/supabase/server'
 import { anthropic } from '@/lib/anthropic'
-import { buildSystemPrompt, buildUserPrompt, extractJson } from '@/lib/prompt-builder'
+import { buildSystemPrompt, buildSingleVersionPrompt, extractJson } from '@/lib/prompt-builder'
 import { NextResponse } from 'next/server'
-import type { GenerationOutput } from '@/types'
+import type { ContentVersion } from '@/types'
 import type { ImageBlockParam } from '@anthropic-ai/sdk/resources/messages'
 
+// Each call generates one version — target <8s on Hobby plan (10s cap)
 export const maxDuration = 60
 
 function log(step: string, detail?: unknown) {
   const ts = new Date().toISOString().slice(11, 23)
-  if (detail !== undefined) {
-    console.log(`[generate ${ts}] ${step}`, detail)
-  } else {
-    console.log(`[generate ${ts}] ${step}`)
-  }
+  if (detail !== undefined) console.log(`[generate ${ts}] ${step}`, detail)
+  else console.log(`[generate ${ts}] ${step}`)
 }
 
 export async function POST(req: Request) {
@@ -25,11 +23,11 @@ export async function POST(req: Request) {
 
     if (authError) {
       log('auth error', authError.message)
-      return NextResponse.json({ error: 'auth error', detail: authError.message }, { status: 401 })
+      return NextResponse.json({ error: `[E-AUTH] ${authError.message}` }, { status: 401 })
     }
     if (!user) {
-      log('unauthorized — no user in session')
-      return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+      log('unauthorized — no session')
+      return NextResponse.json({ error: '[E-AUTH] unauthorized' }, { status: 401 })
     }
     log('auth ok', user.email)
 
@@ -37,68 +35,51 @@ export async function POST(req: Request) {
     try {
       formData = await req.formData()
     } catch (e) {
-      log('formData parse error', e instanceof Error ? e.message : e)
-      return NextResponse.json({ error: 'invalid form data', detail: String(e) }, { status: 400 })
+      log('formData parse error', e)
+      return NextResponse.json({ error: `[E-FORM] ${String(e)}` }, { status: 400 })
     }
 
     const articleText = formData.get('text') as string
+    const version = (formData.get('version') as 'a' | 'b' | 'c') ?? 'a'
     const configId = formData.get('config_id') as string | null
     const imageFiles = formData.getAll('images') as File[]
 
-    log('input', {
-      textLength: articleText?.length ?? 0,
-      configId,
-      imageCount: imageFiles.length,
-    })
+    log('input', { version, textLength: articleText?.length ?? 0, images: imageFiles.length })
 
     if (!articleText?.trim()) {
-      return NextResponse.json({ error: '请输入文章内容' }, { status: 400 })
+      return NextResponse.json({ error: '[E-INPUT] 请输入文章内容' }, { status: 400 })
+    }
+    if (!['a', 'b', 'c'].includes(version)) {
+      return NextResponse.json({ error: '[E-INPUT] invalid version' }, { status: 400 })
     }
 
     // Fetch config
     let config = null
     if (configId) {
-      const { data, error } = await supabase
-        .from('configs')
-        .select('*')
-        .eq('id', configId)
-        .eq('user_id', user.id)
-        .single()
-      if (error) log('config fetch error', error.message)
+      const { data } = await supabase.from('configs').select('*').eq('id', configId).eq('user_id', user.id).single()
       config = data
     }
     if (!config) {
-      const { data, error } = await supabase
-        .from('configs')
-        .select('*')
-        .eq('user_id', user.id)
-        .eq('is_default', true)
-        .single()
-      if (error) log('default config fetch error', error.message)
+      const { data } = await supabase.from('configs').select('*').eq('user_id', user.id).eq('is_default', true).single()
       config = data
     }
-
-    const blankConfig = {
+    const activeConfig = config ?? {
       id: '', user_id: user.id, name: '默认', is_default: true,
       target_audience: null, tone_presets: [], tone_custom: null,
       reference_samples: [], image_style_note: null, forbidden_words: [],
       created_at: '', updated_at: '',
     }
-    const activeConfig = config ?? blankConfig
-    log('config resolved', activeConfig.name)
+    log('config', activeConfig.name)
 
     // Build message content
     const userContent: Array<ImageBlockParam | { type: 'text'; text: string }> = []
-
     for (const file of imageFiles.slice(0, 4)) {
       const buffer = await file.arrayBuffer()
       const base64 = Buffer.from(buffer).toString('base64')
       const mediaType = (file.type || 'image/jpeg') as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
       userContent.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } })
-      log('image attached', `${file.name} (${file.size} bytes, ${mediaType})`)
     }
-
-    userContent.push({ type: 'text', text: buildUserPrompt(articleText) })
+    userContent.push({ type: 'text', text: buildSingleVersionPrompt(articleText, version) })
 
     const encoder = new TextEncoder()
     const stream = new ReadableStream({
@@ -107,14 +88,13 @@ export async function POST(req: Request) {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`))
 
         try {
-          log('calling claude', { model: 'claude-sonnet-4-6', inputBlocks: userContent.length })
-
+          log(`calling claude for version_${version}`)
           let fullText = ''
           let chunkCount = 0
 
           const anthropicStream = anthropic.messages.stream({
             model: 'claude-sonnet-4-6',
-            max_tokens: 4096,
+            max_tokens: 1200,
             system: buildSystemPrompt(activeConfig),
             messages: [{ role: 'user', content: userContent }],
           })
@@ -127,61 +107,32 @@ export async function POST(req: Request) {
             }
           }
 
-          log('claude stream done', { chunks: chunkCount, totalLength: fullText.length })
+          log(`claude done version_${version}`, { chunks: chunkCount, length: fullText.length })
 
           if (!fullText.trim()) {
-            log('empty response from claude')
-            send({ type: 'error', message: 'Claude 返回了空响应，请重试' })
+            send({ type: 'error', message: `[E-EMPTY] version_${version}: Claude返回空响应` })
             controller.close()
             return
           }
 
-          let output: GenerationOutput
+          let result: ContentVersion
           try {
-            const jsonStr = extractJson(fullText)
-            log('parsing json', `first 120 chars: ${jsonStr.slice(0, 120)}`)
-            output = JSON.parse(jsonStr)
+            result = JSON.parse(extractJson(fullText)) as ContentVersion
+            if (!result.title || !result.body) throw new Error('missing required fields')
           } catch (e) {
-            log('json parse failed', { error: e instanceof Error ? e.message : e, rawLength: fullText.length, rawPreview: fullText.slice(0, 200) })
-            send({ type: 'error', message: '生成结果解析失败，请重试' })
+            log(`parse failed version_${version}`, { error: String(e), preview: fullText.slice(0, 150) })
+            send({ type: 'error', message: `[E-PARSE] version_${version}: JSON解析失败 — ${String(e)}` })
             controller.close()
             return
           }
 
-          log('json parse ok')
-
-          const { error: insertError } = await supabase.from('histories').insert({
-            user_id: user.id,
-            input_text: articleText,
-            input_images: [],
-            config_snapshot: {
-              name: activeConfig.name,
-              target_audience: activeConfig.target_audience,
-              tone_presets: activeConfig.tone_presets,
-              tone_custom: activeConfig.tone_custom,
-              reference_samples: activeConfig.reference_samples,
-              image_style_note: activeConfig.image_style_note,
-              forbidden_words: activeConfig.forbidden_words,
-              is_default: activeConfig.is_default,
-            },
-            output,
-            title_preview: output.version_a?.title ?? null,
-          })
-
-          if (insertError) {
-            log('history insert error (non-fatal)', insertError.message)
-          } else {
-            log('history saved')
-          }
-
-          send({ type: 'done', result: output })
+          log(`done version_${version}`)
+          send({ type: 'done', result })
           controller.close()
-          log('done')
         } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err)
-          const stack = err instanceof Error ? err.stack : undefined
-          log('stream error', { message, stack })
-          send({ type: 'error', message })
+          const msg = err instanceof Error ? err.message : String(err)
+          log(`stream error version_${version}`, msg)
+          send({ type: 'error', message: `[E-STREAM] version_${version}: ${msg}` })
           controller.close()
         }
       },
@@ -195,9 +146,8 @@ export async function POST(req: Request) {
       },
     })
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
-    const stack = err instanceof Error ? err.stack : undefined
-    log('unhandled route error', { message, stack })
-    return NextResponse.json({ error: message }, { status: 500 })
+    const msg = err instanceof Error ? err.message : String(err)
+    log('unhandled route error', msg)
+    return NextResponse.json({ error: `[E-ROUTE] ${msg}` }, { status: 500 })
   }
 }

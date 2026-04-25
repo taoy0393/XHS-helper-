@@ -2,13 +2,18 @@
 import { useState, useEffect } from 'react'
 import { InputPanel } from '@/components/generate/InputPanel'
 import { OutputPanel } from '@/components/generate/OutputPanel'
-import type { Config, GenerationOutput } from '@/types'
+import type { Config, ContentVersion, GenerationOutput, VersionKey, VersionsState } from '@/types'
 
-function extractJsonFallback(raw: string): GenerationOutput | null {
+const IDLE_VERSIONS: VersionsState = {
+  a: { status: 'idle', stream: '' },
+  b: { status: 'idle', stream: '' },
+  c: { status: 'idle', stream: '' },
+}
+
+function extractJsonFallback(raw: string): ContentVersion | null {
   try {
     const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
-    const cleaned = match ? match[1].trim() : raw.trim()
-    return JSON.parse(cleaned) as GenerationOutput
+    return JSON.parse(match ? match[1].trim() : raw.trim()) as ContentVersion
   } catch {
     return null
   }
@@ -19,13 +24,10 @@ export default function GeneratePage() {
   const [images, setImages] = useState<File[]>([])
   const [configs, setConfigs] = useState<Config[]>([])
   const [selectedConfigId, setSelectedConfigId] = useState('')
+  const [versions, setVersions] = useState<VersionsState>(IDLE_VERSIONS)
   const [loading, setLoading] = useState(false)
-  const [streaming, setStreaming] = useState(false)
-  const [streamText, setStreamText] = useState('')
-  const [output, setOutput] = useState<GenerationOutput | null>(null)
-  const [error, setError] = useState('')
+  const [validationError, setValidationError] = useState('')
 
-  // Load configs
   useEffect(() => {
     fetch('/api/configs')
       .then(r => r.json())
@@ -38,7 +40,7 @@ export default function GeneratePage() {
       .catch(() => {})
   }, [])
 
-  // Prefill text from history "regenerate" action
+  // Prefill from history "regenerate"
   useEffect(() => {
     const prefill = sessionStorage.getItem('regenerate_text')
     if (prefill) {
@@ -47,41 +49,34 @@ export default function GeneratePage() {
     }
   }, [])
 
-  async function handleGenerate() {
-    if (!text.trim()) return
-    setError('')
-    setOutput(null)
-    setStreamText('')
-    setLoading(true)
-    setStreaming(true)
-
+  async function generateVersion(v: VersionKey): Promise<ContentVersion | null> {
     const formData = new FormData()
     formData.append('text', text)
+    formData.append('version', v)
     if (selectedConfigId) formData.append('config_id', selectedConfigId)
     images.forEach(img => formData.append('images', img))
 
+    setVersions(prev => ({ ...prev, [v]: { status: 'loading', stream: '' } }))
+
+    const startMs = Date.now()
     let accumulatedText = ''
-    let gotDoneEvent = false
+    let gotDone = false
 
     try {
       const res = await fetch('/api/generate', { method: 'POST', body: formData })
       if (!res.ok) {
-        let detail = `[E1] HTTP ${res.status}`
+        let msg = `[E1] HTTP ${res.status}`
         try {
-          const err = await res.json()
-          detail = `[E1] HTTP ${res.status} — ${err.error ?? '未知错误'}`
-          if (err.detail) detail += ` (${err.detail})`
-        } catch {
-          detail += ` — ${await res.text().catch(() => '(no body)')}`
-        }
-        throw new Error(detail)
+          const body = await res.json()
+          msg = body.error ?? msg
+        } catch { /* ignore */ }
+        setVersions(prev => ({ ...prev, [v]: { status: 'error', stream: '', error: msg } }))
+        return null
       }
 
       const reader = res.body!.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
-      let lineNum = 0
-      const startMs = Date.now()
 
       while (true) {
         const { done, value } = await reader.read()
@@ -93,66 +88,92 @@ export default function GeneratePage() {
 
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue
-          lineNum++
-          let payload: { type: string; text?: string; result?: GenerationOutput; message?: string }
-          try {
-            payload = JSON.parse(line.slice(6))
-          } catch {
-            console.warn('[generate] unparseable SSE line', line)
-            continue
-          }
+          let payload: { type: string; text?: string; result?: ContentVersion; message?: string }
+          try { payload = JSON.parse(line.slice(6)) } catch { continue }
 
           if (payload.type === 'chunk') {
             accumulatedText += payload.text ?? ''
-            setStreamText(prev => prev + (payload.text ?? ''))
+            setVersions(prev => ({
+              ...prev,
+              [v]: { ...prev[v], stream: prev[v].stream + (payload.text ?? '') },
+            }))
           } else if (payload.type === 'done') {
-            gotDoneEvent = true
-            if (payload.result && payload.result.version_a) {
-              setOutput(payload.result)
-            } else {
-              const fallback = extractJsonFallback(accumulatedText)
-              if (fallback) {
-                setOutput(fallback)
-              } else {
-                throw new Error(
-                  `[E2] done事件收到但结果为空 — chars:${accumulatedText.length} events:${lineNum}`
-                )
-              }
-            }
-            setStreaming(false)
+            gotDone = true
+            const result = payload.result!
+            setVersions(prev => ({ ...prev, [v]: { status: 'done', stream: '', data: result } }))
+            return result
           } else if (payload.type === 'error') {
-            throw new Error(`[E3] 服务端错误 — ${payload.message ?? '未知'}`)
+            const msg = payload.message ?? '[E3] 服务端错误'
+            setVersions(prev => ({ ...prev, [v]: { status: 'error', stream: '', error: msg } }))
+            return null
           }
         }
       }
 
-      // Stream ended without a done event
-      if (!gotDoneEvent) {
+      // Stream ended without done event — try fallback parse
+      if (!gotDone) {
         const elapsed = Math.round((Date.now() - startMs) / 1000)
-        const chars = accumulatedText.length
-        console.warn('[generate] no done event', { lineNum, chars, elapsed })
         const fallback = extractJsonFallback(accumulatedText)
         if (fallback) {
-          setOutput(fallback)
-        } else if (lineNum === 0) {
-          throw new Error(`[E4] 服务端无响应 (${elapsed}s) — 请检查Vercel Function日志`)
-        } else {
-          // Most likely cause: Vercel function timeout cut the stream mid-JSON
-          throw new Error(
-            `[E5] 流中断 (${elapsed}s) — 已收到${lineNum}行/${chars}字符但JSON不完整。` +
-            `可能是Vercel函数超时(Hobby限10s)。末尾: "${accumulatedText.slice(-80)}"`
-          )
+          setVersions(prev => ({ ...prev, [v]: { status: 'done', stream: '', data: fallback } }))
+          return fallback
         }
+        const chars = accumulatedText.length
+        const preview = accumulatedText.slice(-60)
+        const msg = chars === 0
+          ? `[E4] version_${v}: 无响应 (${elapsed}s) — 可能是函数超时`
+          : `[E5] version_${v}: 流中断 (${elapsed}s, ${chars}字符) 末尾:"${preview}"`
+        console.warn('[generate]', msg)
+        setVersions(prev => ({ ...prev, [v]: { status: 'error', stream: '', error: msg } }))
+        return null
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '[E0] 生成失败'
-      console.error('[generate] client error:', msg)
-      setError(msg)
+      const msg = err instanceof Error ? err.message : `[E0] version_${v}: 未知错误`
+      console.error('[generate]', msg)
+      setVersions(prev => ({ ...prev, [v]: { status: 'error', stream: '', error: msg } }))
+    }
+    return null
+  }
+
+  async function handleGenerate() {
+    if (!text.trim()) {
+      setValidationError('请输入文章内容')
+      return
+    }
+    setValidationError('')
+    setVersions({
+      a: { status: 'loading', stream: '' },
+      b: { status: 'loading', stream: '' },
+      c: { status: 'loading', stream: '' },
+    })
+    setLoading(true)
+
+    try {
+      const [resultA, resultB, resultC] = await Promise.all([
+        generateVersion('a'),
+        generateVersion('b'),
+        generateVersion('c'),
+      ])
+
+      // Save to history only if all 3 succeeded
+      if (resultA && resultB && resultC) {
+        const output: GenerationOutput = {
+          version_a: resultA,
+          version_b: resultB,
+          version_c: resultC,
+        }
+        fetch('/api/histories', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ input_text: text, config_id: selectedConfigId || null, output }),
+        }).catch(e => console.warn('[history save]', e))
+      }
     } finally {
       setLoading(false)
-      setStreaming(false)
     }
   }
+
+  const allIdle = Object.values(versions).every(v => v.status === 'idle')
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
@@ -170,17 +191,20 @@ export default function GeneratePage() {
             onGenerate={handleGenerate}
             loading={loading}
           />
-          {error && (
-            <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2">
-              <p className="text-xs font-semibold text-red-600 mb-1">生成失败</p>
-              <pre className="text-xs text-red-700 whitespace-pre-wrap break-all">{error}</pre>
-            </div>
+          {validationError && (
+            <p className="mt-2 text-sm text-red-500">{validationError}</p>
           )}
         </div>
 
         <div>
           <h2 className="text-xl font-semibold mb-4">生成结果</h2>
-          <OutputPanel output={output} streaming={streaming} streamText={streamText} />
+          {allIdle ? (
+            <div className="flex items-center justify-center min-h-[400px] text-gray-400 border-2 border-dashed rounded-xl">
+              <p className="text-sm">生成结果将在此显示</p>
+            </div>
+          ) : (
+            <OutputPanel versions={versions} />
+          )}
         </div>
       </div>
     </div>

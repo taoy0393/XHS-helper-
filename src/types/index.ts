@@ -50,3 +50,14 @@ export interface History {
 
 export const TONE_PRESETS = ['活泼', '专业', '治愈', '种草', '干货'] as const
 export type TonePreset = typeof TONE_PRESETS[number]
+
+export type VersionKey = 'a' | 'b' | 'c'
+
+export interface VersionState {
+  status: 'idle' | 'loading' | 'done' | 'error'
+  stream: string
+  data?: ContentVersion
+  error?: string
+}
+
+export type VersionsState = Record<VersionKey, VersionState>

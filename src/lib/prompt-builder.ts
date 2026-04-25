@@ -39,6 +39,39 @@ export function buildSystemPrompt(config: Config): string {
   return lines.join('\n')
 }
 
+const VERSION_STYLES: Record<'a' | 'b' | 'c', { label: string; style: string }> = {
+  a: { label: '草种型', style: '以真实体验和产品价值为核心，激发读者种草欲望' },
+  b: { label: '共鸣型', style: '以情感故事和生活共鸣为核心，引发读者情感认同' },
+  c: { label: '干货型', style: '以实用建议和干货知识为核心，提供清晰可操作的信息' },
+}
+
+export function buildSingleVersionPrompt(articleText: string, version: 'a' | 'b' | 'c'): string {
+  const { label, style } = VERSION_STYLES[version]
+  return `请将以下公众号文章改编为一个小红书帖子。
+
+版本类型：${label}（${style}）
+
+文章内容：
+${articleText}
+
+只输出以下 JSON，不要其他文字：
+{
+  "label": "${label}",
+  "title": "标题（不超过20字）",
+  "body": "正文（500-800字，多用换行和emoji）",
+  "tags": ["#标签1", "#标签2", "#标签3", "#标签4", "#标签5"],
+  "image_brief": {
+    "description": "整体配图方向",
+    "scene": "场景",
+    "composition": "构图建议",
+    "lighting": "光线要求",
+    "color_tone": "色调",
+    "props": "道具或元素",
+    "avoid": "避免出现的内容"
+  }
+}`
+}
+
 export function buildUserPrompt(articleText: string): string {
   return `请将以下公众号文章改编为 3 个小红书帖子版本。
 
