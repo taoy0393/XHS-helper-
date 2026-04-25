@@ -1,9 +1,7 @@
 'use client'
 import { useState } from 'react'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
 import type { GenerationOutput, ContentVersion } from '@/types'
 
 interface Props {
@@ -15,7 +13,7 @@ interface Props {
 export function OutputPanel({ output, streaming, streamText }: Props) {
   if (!output && !streaming) {
     return (
-      <div className="flex items-center justify-center h-full min-h-[400px] text-gray-400 border-2 border-dashed rounded-xl">
+      <div className="flex items-center justify-center min-h-[400px] text-gray-400 border-2 border-dashed rounded-xl">
         <p className="text-sm">生成结果将在此显示</p>
       </div>
     )
@@ -28,7 +26,7 @@ export function OutputPanel({ output, streaming, streamText }: Props) {
           <span className="inline-block w-2 h-2 bg-green-500 rounded-full animate-pulse" />
           正在生成中…
         </div>
-        <pre className="text-xs text-gray-600 whitespace-pre-wrap font-mono leading-relaxed max-h-[500px] overflow-y-auto">
+        <pre className="text-xs text-gray-400 whitespace-pre-wrap font-mono leading-relaxed max-h-[500px] overflow-y-auto">
           {streamText}
         </pre>
       </div>
@@ -37,79 +35,79 @@ export function OutputPanel({ output, streaming, streamText }: Props) {
 
   if (!output) return null
 
-  const versions = [
-    { key: 'version_a', data: output.version_a },
-    { key: 'version_b', data: output.version_b },
-    { key: 'version_c', data: output.version_c },
+  const versions: { key: keyof GenerationOutput; color: string }[] = [
+    { key: 'version_a', color: 'border-pink-200 bg-pink-50' },
+    { key: 'version_b', color: 'border-purple-200 bg-purple-50' },
+    { key: 'version_c', color: 'border-blue-200 bg-blue-50' },
   ]
 
   return (
-    <Tabs defaultValue="version_a">
-      <TabsList className="w-full mb-4">
-        {versions.map(({ key, data }) => (
-          <TabsTrigger key={key} value={key} className="flex-1">
-            {data?.label ?? key}
-          </TabsTrigger>
-        ))}
-      </TabsList>
-      {versions.map(({ key, data }) => (
-        <TabsContent key={key} value={key}>
-          <VersionCard version={data} />
-        </TabsContent>
-      ))}
-    </Tabs>
+    <div className="space-y-6">
+      {versions.map(({ key, color }) => {
+        const version = output[key]
+        if (!version) return null
+        return <VersionCard key={key} version={version} borderColor={color} />
+      })}
+    </div>
   )
 }
 
-function VersionCard({ version }: { version: ContentVersion }) {
+function VersionCard({ version, borderColor }: { version: ContentVersion; borderColor: string }) {
   const [copied, setCopied] = useState(false)
   const [briefOpen, setBriefOpen] = useState(false)
 
-  async function copyAll() {
-    const text = `${version.title}\n\n${version.body}\n\n${version.tags.join(' ')}`
-    await navigator.clipboard.writeText(text)
+  const copyText = `${version.title}\n\n${version.body}\n\n${version.tags.join(' ')}`
+
+  async function copy() {
+    await navigator.clipboard.writeText(copyText)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <h2 className="text-lg font-semibold leading-snug">{version.title}</h2>
-        <Button variant="outline" size="sm" onClick={copyAll} className="shrink-0">
-          {copied ? '已复制' : '复制全文'}
+    <div className={`rounded-xl border-2 ${borderColor} overflow-hidden`}>
+      {/* card header */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-inherit">
+        <Badge variant="secondary" className="text-xs font-semibold">{version.label}</Badge>
+        <Button variant="ghost" size="sm" className="text-xs h-7 px-2" onClick={copy}>
+          {copied ? '已复制 ✓' : '复制全文'}
         </Button>
       </div>
 
-      <div className="whitespace-pre-wrap text-sm leading-relaxed text-gray-800">
-        {version.body}
+      {/* XHS post preview */}
+      <div className="p-4 space-y-3 bg-white">
+        {/* title */}
+        <p className="text-base font-bold leading-snug text-gray-900">{version.title}</p>
+
+        {/* body */}
+        <p className="text-sm leading-relaxed text-gray-800 whitespace-pre-wrap">{version.body}</p>
+
+        {/* tags — rendered as plain text the way XHS shows them */}
+        <p className="text-sm text-[#ff2442] font-medium leading-relaxed">
+          {version.tags.join(' ')}
+        </p>
       </div>
 
-      <div className="flex flex-wrap gap-1.5">
-        {version.tags.map(tag => (
-          <Badge key={tag} variant="secondary" className="text-xs">{tag}</Badge>
-        ))}
-      </div>
-
-      <Card className="bg-amber-50 border-amber-200">
-        <CardHeader
-          className="pb-2 cursor-pointer flex flex-row items-center justify-between"
+      {/* image brief — collapsible */}
+      <div className="border-t border-inherit">
+        <button
+          className="w-full flex items-center justify-between px-4 py-2 text-xs text-gray-500 hover:bg-black/5 transition-colors"
           onClick={() => setBriefOpen(v => !v)}
         >
-          <CardTitle className="text-sm text-amber-800">📷 配图创作简报</CardTitle>
-          <span className="text-amber-600 text-xs">{briefOpen ? '收起' : '展开'}</span>
-        </CardHeader>
+          <span>📷 配图创作简报</span>
+          <span>{briefOpen ? '▲ 收起' : '▼ 展开'}</span>
+        </button>
         {briefOpen && (
-          <CardContent className="pt-0 text-sm space-y-1 text-amber-900">
-            {Object.entries(version.image_brief).map(([k, v]) => (
-              <div key={k} className="flex gap-2">
-                <span className="font-medium shrink-0 w-16">{labelFor(k)}</span>
-                <span>{v}</span>
-              </div>
+          <div className="px-4 pb-4 grid grid-cols-[64px_1fr] gap-x-3 gap-y-1.5 text-xs bg-white">
+            {Object.entries(version.image_brief ?? {}).map(([k, v]) => (
+              <>
+                <span key={`${k}-label`} className="font-medium text-gray-500 pt-0.5">{labelFor(k)}</span>
+                <span key={`${k}-value`} className="text-gray-700">{v as string}</span>
+              </>
             ))}
-          </CardContent>
+          </div>
         )}
-      </Card>
+      </div>
     </div>
   )
 }
