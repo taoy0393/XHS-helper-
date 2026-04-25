@@ -42,13 +42,21 @@ export default function GeneratePage() {
     try {
       const res = await fetch('/api/generate', { method: 'POST', body: formData })
       if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.error ?? '请求失败')
+        let detail = `HTTP ${res.status}`
+        try {
+          const err = await res.json()
+          detail = err.error ?? detail
+          if (err.detail) detail += `: ${err.detail}`
+        } catch {
+          detail += ` — ${await res.text().catch(() => '(no body)')}`
+        }
+        throw new Error(detail)
       }
 
       const reader = res.body!.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
+      let lineNum = 0
 
       while (true) {
         const { done, value } = await reader.read()
@@ -60,20 +68,33 @@ export default function GeneratePage() {
 
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue
-          const payload = JSON.parse(line.slice(6))
+          lineNum++
+          let payload: { type: string; text?: string; result?: GenerationOutput; message?: string }
+          try {
+            payload = JSON.parse(line.slice(6))
+          } catch {
+            console.warn('[generate] unparseable SSE line', line)
+            continue
+          }
 
           if (payload.type === 'chunk') {
-            setStreamText(prev => prev + payload.text)
+            setStreamText(prev => prev + (payload.text ?? ''))
           } else if (payload.type === 'done') {
-            setOutput(payload.result)
+            setOutput(payload.result!)
             setStreaming(false)
           } else if (payload.type === 'error') {
-            throw new Error(payload.message)
+            throw new Error(payload.message ?? '服务端错误')
           }
         }
       }
+
+      if (lineNum === 0) {
+        throw new Error('服务端无响应 — 请检查终端日志')
+      }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '生成失败，请重试')
+      const msg = err instanceof Error ? err.message : '生成失败，请重试'
+      console.error('[generate] client error:', msg)
+      setError(msg)
       setStreaming(false)
     } finally {
       setLoading(false)
@@ -97,7 +118,10 @@ export default function GeneratePage() {
             loading={loading}
           />
           {error && (
-            <p className="mt-3 text-sm text-red-500">{error}</p>
+            <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2">
+              <p className="text-xs font-semibold text-red-600 mb-1">生成失败</p>
+              <pre className="text-xs text-red-700 whitespace-pre-wrap break-all">{error}</pre>
+            </div>
           )}
         </div>
 
